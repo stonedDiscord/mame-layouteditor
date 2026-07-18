@@ -23,11 +23,17 @@ interface LayoutItem {
   inputtag?: string;
   inputmask?: number;
   defstate?: number;
+  screenTag?: string;
+  sourceNode?: Element;
+  sourceBoundsNode?: Element;
+  sourceComponentNode?: Element;
+  sourceEditable?: boolean;
+  componentState?: number;
 }
 
-interface ViewDef    { id: string; name: string; items: LayoutItem[]; }
+interface ViewDef    { id: string; name: string; items: LayoutItem[]; sourceNode?: Element; }
 interface ElementDef { id: string; name: string; components: LayoutItem[]; }
-interface LayoutDoc  { views: ViewDef[]; elements: ElementDef[]; }
+interface LayoutDoc  { views: ViewDef[]; elements: ElementDef[]; sourceXml?: Document; }
 
 // ─────────────────────────────────────────────────────────────────
 // STATE
@@ -76,6 +82,9 @@ function snapWorld(v: number): number {
   return Math.round(v / 8) * 8;
 }
 function snap(v: number) { return snapWorld(v); }
+function minItemSize(item: LayoutItem): number {
+  return Math.max(0.001, Math.min(8, item.bounds.width, item.bounds.height) / 10);
+}
 function esc(s: string)  { return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -164,6 +173,12 @@ function addView() {
   const name = prompt('View name:', `View ${doc.views.length + 1}`);
   if (!name) return;
   const v: ViewDef = { id: genId(), name, items: [] };
+  if (doc.sourceXml) {
+    const root = doc.sourceXml.documentElement;
+    v.sourceNode = doc.sourceXml.createElement('view');
+    v.sourceNode.setAttribute('name', name);
+    root.appendChild(v.sourceNode);
+  }
   doc.views.push(v);
   currentViewId  = v.id;
   selectedItemId = null;
@@ -185,6 +200,8 @@ function selectView(id: string) {
 
 function deleteView(id: string) {
   if (!confirm('Delete this view?')) return;
+  const removed = doc.views.find(v => v.id === id);
+  if (removed?.sourceNode) removed.sourceNode.remove();
   doc.views = doc.views.filter(v => v.id !== id);
   if (currentViewId === id) {
     currentViewId  = doc.views[0]?.id || null;
@@ -200,7 +217,11 @@ function renameView(id: string) {
   const v = doc.views.find(x => x.id === id);
   if (!v) return;
   const n = prompt('New name:', v.name);
-  if (n) { v.name = n; refreshViewsList(); updateViewLabel(); }
+  if (n) {
+    v.name = n;
+    v.sourceNode?.setAttribute('name', n);
+    refreshViewsList(); updateViewLabel();
+  }
 }
 
 function refreshViewsList() {
@@ -261,6 +282,7 @@ function addItemAt(type: string, canvasX: number, canvasY: number) {
   if (!v) { alert('Create a view first.'); return; }
   const item = createItem(type, snap(toWorldX(canvasX)), snap(toWorldY(canvasY)));
   v.items.push(item);
+  addItemToSource(v, item);
   selectedItemId = item.id;
   refreshLayers();
   renderProps();
@@ -273,6 +295,8 @@ function deleteSelected() {
   if (!selectedItemId) return;
   const v = currentView();
   if (!v) return;
+  const removed = selectedItem();
+  if (removed?.sourceEditable) removed.sourceNode?.remove();
   v.items     = v.items.filter(i => i.id !== selectedItemId);
   selectedItemId = null;
   refreshLayers();
@@ -285,6 +309,37 @@ function deleteSelected() {
 function selectedItem(): LayoutItem | null {
   if (!selectedItemId) return null;
   return currentView()?.items.find(i => i.id === selectedItemId) || null;
+}
+
+function addItemToSource(view: ViewDef, item: LayoutItem) {
+  if (!doc.sourceXml || !view.sourceNode) return;
+  const xml = doc.sourceXml;
+  const root = xml.documentElement;
+  const instance = xml.createElement(item.type === 'screen' ? 'screen' : item.type === 'group' ? 'group' : 'element');
+  if (item.type === 'screen') instance.setAttribute('index', String(item.screenIndex ?? 0));
+  else if (item.type === 'group') instance.setAttribute('ref', item.groupRef || item.name);
+  else {
+    let defName = item.name;
+    while (Array.from(root.children).some(el => el.tagName === 'element' && el.getAttribute('name') === defName)) {
+      defName = `${item.name}_${genId().slice(0, 4)}`;
+    }
+    item.name = defName;
+    instance.setAttribute('name', defName);
+    instance.setAttribute('ref', defName);
+    const def = xml.createElement('element');
+    def.setAttribute('name', defName);
+    const comp = xml.createElement(item.type);
+    def.appendChild(comp);
+    root.insertBefore(def, Array.from(root.children).find(el => el.tagName === 'view') || null);
+    item.sourceComponentNode = comp;
+  }
+  const bounds = xml.createElement('bounds');
+  instance.appendChild(bounds);
+  view.sourceNode.appendChild(instance);
+  item.sourceNode = instance;
+  item.sourceBoundsNode = bounds;
+  item.sourceEditable = true;
+  syncItemToSource(item);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -747,11 +802,13 @@ canvas.addEventListener('mousemove', e => {
     const dy = (my - dragStartY) / viewScale;
     let { x, y, width, height } = dragItemOrig;
     const h = resizeHandle;
-    if (h.includes('e')) { width  = snap(Math.max(8, width + dx)); }
-    if (h.includes('s')) { height = snap(Math.max(8, height + dy)); }
-    if (h.includes('w')) { const nw = snap(Math.max(8, width - dx)); x = snap(x + width - nw); width = nw; }
-    if (h.includes('n')) { const nh = snap(Math.max(8, height - dy)); y = snap(y + height - nh); height = nh; }
+    const minSize = minItemSize(item);
+    if (h.includes('e')) { width  = snap(Math.max(minSize, width + dx)); }
+    if (h.includes('s')) { height = snap(Math.max(minSize, height + dy)); }
+    if (h.includes('w')) { const nw = snap(Math.max(minSize, width - dx)); x = snap(x + width - nw); width = nw; }
+    if (h.includes('n')) { const nh = snap(Math.max(minSize, height - dy)); y = snap(y + height - nh); height = nh; }
     item.bounds = { x, y, width, height };
+    syncItemToSource(item);
     renderProps(); updateXmlPreview(); render(); return;
   }
 
@@ -760,6 +817,7 @@ canvas.addEventListener('mousemove', e => {
     if (!item || !dragItemOrig) return;
     item.bounds.x = snap(dragItemOrig.x + (mx - dragStartX) / viewScale);
     item.bounds.y = snap(dragItemOrig.y + (my - dragStartY) / viewScale);
+    syncItemToSource(item);
     renderProps(); updateXmlPreview(); render(); return;
   }
 
@@ -797,11 +855,13 @@ canvas.addEventListener('keydown', e => {
   if (e.key === 'f' || e.key === 'F') fitView();
   const item = selectedItem();
   if (item) {
-    const d = e.shiftKey ? SNAP * 4 : SNAP;
+    const fractional = Math.max(Math.abs(item.bounds.x), Math.abs(item.bounds.y), item.bounds.width, item.bounds.height) < 50;
+    const d = fractional ? (e.shiftKey ? 0.1 : 0.01) : (e.shiftKey ? SNAP * 4 : SNAP);
     if (e.key === 'ArrowLeft')  { item.bounds.x -= d; e.preventDefault(); }
     if (e.key === 'ArrowRight') { item.bounds.x += d; e.preventDefault(); }
     if (e.key === 'ArrowUp')    { item.bounds.y -= d; e.preventDefault(); }
     if (e.key === 'ArrowDown')  { item.bounds.y += d; e.preventDefault(); }
+    syncItemToSource(item);
     renderProps(); updateXmlPreview(); render();
   }
 });
@@ -959,35 +1019,44 @@ function renderProps() {
 
 function onViewNameChange(val: string) {
   const v = currentView();
-  if (v) { v.name = val; refreshViewsList(); updateViewLabel(); }
+  if (v) {
+    v.name = val;
+    v.sourceNode?.setAttribute('name', val);
+    refreshViewsList(); updateViewLabel(); updateXmlPreview();
+  }
 }
 function onPropStr(key: string, val: string) {
   const item = selectedItem(); if (!item) return;
   (item as unknown as Record<string, unknown>)[key] = val;
+  syncItemToSource(item);
   render(); updateXmlPreview();
 }
 function onPropNum(key: string, val: string) {
   const item = selectedItem(); if (!item) return;
   const n = parseFloat(val); if (isNaN(n)) return;
   (item as unknown as Record<string, unknown>)[key] = n;
+  syncItemToSource(item);
   render(); updateXmlPreview();
 }
 function onPropHex(key: string, val: string) {
   const item = selectedItem(); if (!item) return;
   const n = parseInt(val, val.startsWith('0x') || val.startsWith('0X') ? 16 : 10);
   if (!isNaN(n)) (item as unknown as Record<string, unknown>)[key] = n;
+  syncItemToSource(item);
   updateXmlPreview();
 }
 function onBounds(key: string, val: string) {
   const item = selectedItem(); if (!item) return;
   const n = parseFloat(val); if (isNaN(n)) return;
   (item.bounds as unknown as Record<string, unknown>)[key] = n;
+  syncItemToSource(item);
   render(); updateXmlPreview();
 }
 function onColor(key: string, val: string) {
   const item = selectedItem(); if (!item) return;
   const n = parseFloat(val); if (isNaN(n)) return;
   (item.color as unknown as Record<string, unknown>)[key] = clamp(n, 0, 1);
+  syncItemToSource(item);
   render(); updateXmlPreview();
 }
 function onColorPick(hex: string) {
@@ -995,6 +1064,7 @@ function onColorPick(hex: string) {
   item.color.red   = parseInt(hex.slice(1,3), 16) / 255;
   item.color.green = parseInt(hex.slice(3,5), 16) / 255;
   item.color.blue  = parseInt(hex.slice(5,7), 16) / 255;
+  syncItemToSource(item);
   renderProps(); render(); updateXmlPreview();
 }
 
@@ -1017,6 +1087,51 @@ function fmtColor(c: Color) {
 }
 function fmtInnerBounds(b: Bounds) {
   return `x="0" y="0" width="${b.width}" height="${b.height}"`;
+}
+
+function syncItemToSource(item: LayoutItem) {
+  if (!item.sourceEditable) return;
+  const bounds = item.sourceBoundsNode;
+  if (bounds) {
+    for (const attr of ['left','right','top','bottom','xc','yc']) bounds.removeAttribute(attr);
+    bounds.setAttribute('x', String(item.bounds.x));
+    bounds.setAttribute('y', String(item.bounds.y));
+    bounds.setAttribute('width', String(item.bounds.width));
+    bounds.setAttribute('height', String(item.bounds.height));
+  }
+  const node = item.sourceNode;
+  if (node) {
+    if (item.type === 'screen') {
+      if (item.screenTag) node.setAttribute('tag', item.screenTag);
+      else node.setAttribute('index', String(item.screenIndex ?? 0));
+    } else if (item.type === 'group') {
+      node.setAttribute('ref', item.groupRef || item.name);
+    } else {
+      node.setAttribute('name', item.name);
+      if (item.inputtag) node.setAttribute('inputtag', item.inputtag); else node.removeAttribute('inputtag');
+      if (item.inputmask !== undefined) node.setAttribute('inputmask', `0x${item.inputmask.toString(16)}`);
+    }
+  }
+  const comp = item.sourceComponentNode;
+  if (comp) {
+    if (item.type === 'text') {
+      comp.setAttribute('string', item.textString || '');
+      comp.setAttribute('align', String(item.textAlign ?? 0));
+    } else if (item.type === 'image' && item.imageFile) {
+      comp.setAttribute('file', item.imageFile);
+    }
+    let color = Array.from(comp.children).find(c => c.tagName.toLowerCase() === 'color');
+    if (!color && item.type !== 'image') {
+      color = comp.ownerDocument.createElement('color');
+      comp.appendChild(color);
+    }
+    if (color) {
+      color.setAttribute('red', String(item.color.red));
+      color.setAttribute('green', String(item.color.green));
+      color.setAttribute('blue', String(item.color.blue));
+      color.setAttribute('alpha', String(item.color.alpha));
+    }
+  }
 }
 
 function elementDef(item: LayoutItem): string | null {
@@ -1057,6 +1172,15 @@ function viewItemXml(item: LayoutItem, ind = '        '): string {
 }
 
 function generateXML(): string {
+  if (doc.sourceXml) {
+    doc.views.flatMap(v => v.items).forEach(syncItemToSource);
+    const cloned = doc.sourceXml.cloneNode(true) as Document;
+    const walker = cloned.createTreeWalker(cloned, NodeFilter.SHOW_COMMENT);
+    const comments: Comment[] = [];
+    while (walker.nextNode()) comments.push(walker.currentNode as Comment);
+    comments.forEach(comment => comment.remove());
+    return `<?xml version="1.0" encoding="utf-8"?>\n${new XMLSerializer().serializeToString(cloned.documentElement)}\n`;
+  }
   const allItems = doc.views.flatMap(v => v.items);
   const defs = allItems
     .filter(i => i.type !== 'screen' && i.type !== 'group')
@@ -1154,72 +1278,55 @@ function doImport() {
 }
 
 function parseLayoutDoc(xmlDoc: Document) {
-  const newDoc: LayoutDoc = { views: [], elements: [] };
+  const newDoc: LayoutDoc = { views: [], elements: [], sourceXml: xmlDoc };
   const elemDefs: Record<string, ElementDef> = {};
+  const groupDefs: Record<string, Element> = {};
+  const rootParams: ParamMap = {};
 
-  // ── parse element definitions ──
-  xmlDoc.querySelectorAll('mamelayout > element').forEach(el => {
-    const name     = el.getAttribute('name') || genId();
-    const defstate = parseInt(el.getAttribute('defstate') || '0');
+  function addElementDef(el: Element, params: ParamMap) {
+    const name = subParams(el.getAttribute('name') || genId(), params);
+    const defstate = parseMAMEInt(subParams(el.getAttribute('defstate') || '0', params));
     const def: ElementDef = { id: genId(), name, components: [] };
 
-    el.querySelectorAll('rect,disk,text,image,led7seg,led14seg').forEach(comp => {
-      // For multi-state elements pick the "on" state (state=1) color if present,
-      // otherwise fall back to the first color child.
+    Array.from(el.children).forEach(comp => {
+      const type = componentType(comp.tagName.toLowerCase());
+      if (!type) return;
       const stateAttr = comp.getAttribute('state');
-      const compState = stateAttr !== null ? parseInt(stateAttr) : null;
-
-      // Find the color child. Some elements embed color as child, some as attribute.
-      const colorEl = comp.querySelector(':scope > color');
-      const color   = parseColorEl(colorEl);
-
-      const bounds  = parseBoundsEl(comp.querySelector(':scope > bounds'));
+      const compState = stateAttr !== null ? parseMAMEInt(subParams(stateAttr, params)) : undefined;
+      const colorEl = directChild(comp, 'color');
+      const color = parseColorEl(colorEl, params);
+      const bounds = parseBoundsEl(directChild(comp, 'bounds'), params);
       const ci: LayoutItem = {
         id: genId(), name,
-        type: comp.tagName.toLowerCase() as ItemType,
+        type,
         bounds, color,
         defstate,
+        componentState: compState,
+        sourceComponentNode: comp,
       };
-      if (comp.tagName === 'text') {
-        ci.textString = comp.getAttribute('string') || '';
-        ci.textAlign  = parseInt(comp.getAttribute('align') || '0');
+      if (type === 'text') {
+        ci.textString = subParams(comp.getAttribute('string') || '', params);
+        ci.textAlign = parseInt(comp.getAttribute('align') || '0');
       }
-      if (comp.tagName === 'image') ci.imageFile = comp.getAttribute('file') || '';
-
-      // Only add the component that represents the "on"/"active" state for display.
-      // If compState is null (no state attr) or 1, we include it.
-      // If compState === 0 (dim/off state) and there's also a state=1 component, skip it.
-      // We'll resolve this after collecting all components.
-      (ci as LayoutItem & { _state?: number })._state = compState ?? -1;
+      if (type === 'image') ci.imageFile = subParams(comp.getAttribute('file') || '', params);
       def.components.push(ci);
     });
-
-    // For elements with state-based rects: prefer the state=1 component for display color.
-    // Collapse multi-state sets into a single representative component.
-    const byType = new Map<string, Array<LayoutItem & { _state?: number }>>();
-    for (const c of def.components as Array<LayoutItem & { _state?: number }>) {
-      const key = c.type;
-      if (!byType.has(key)) byType.set(key, []);
-      byType.get(key)!.push(c);
-    }
-    def.components = [];
-    byType.forEach(group => {
-      // pick state=1 if available, else state=-1, else first
-      const onState = group.find(c => c._state === 1);
-      const noState = group.find(c => c._state === -1);
-      const picked  = onState ?? noState ?? group[0];
-      delete (picked as unknown as Record<string,unknown>)._state;
-      def.components.push(picked);
-    });
-
     elemDefs[name] = def;
     newDoc.elements.push(def);
-  });
+  }
 
-  // ── parse views ──
-  xmlDoc.querySelectorAll('mamelayout > view').forEach(vEl => {
-    const view: ViewDef = { id: genId(), name: vEl.getAttribute('name') || 'View', items: [] };
-    parseViewChildren(vEl, view, elemDefs, {});
+  // Definitions and parameters are scoped sequentially at the document root.
+  walkExpanded(xmlDoc.documentElement, rootParams, (child, params) => {
+    const tag = child.tagName.toLowerCase();
+    if (tag === 'element') addElementDef(child, params);
+    else if (tag === 'group') groupDefs[subParams(child.getAttribute('name') || '', params)] = child;
+  }, new Set(['element', 'group', 'view']));
+
+  Array.from(xmlDoc.documentElement.children).filter(el => el.tagName.toLowerCase() === 'view').forEach(vEl => {
+    const view: ViewDef = {
+      id: genId(), name: vEl.getAttribute('name') || 'View', items: [], sourceNode: vEl,
+    };
+    parseViewChildren(vEl, view, elemDefs, groupDefs, { ...rootParams }, true, new Set());
     newDoc.views.push(view);
   });
 
@@ -1235,123 +1342,211 @@ function parseLayoutDoc(xmlDoc: Document) {
   requestAnimationFrame(fitView);
 }
 
-// Recursively parse children of a view or repeat block, expanding params.
+type ParamMap = Record<string, number | string>;
+
+function directChild(parent: Element, tag: string): Element | null {
+  return Array.from(parent.children).find(child => child.tagName.toLowerCase() === tag) || null;
+}
+
+function componentType(tag: string): ItemType | null {
+  if (tag === 'rect' || tag === 'disk' || tag === 'text' || tag === 'image' || tag === 'led7seg' || tag === 'led14seg') return tag;
+  if (tag === 'led16seg' || tag === 'led16segsc' || tag === 'led14segsc') return 'led14seg';
+  if (tag === 'simplecounter') return 'text';
+  return null;
+}
+
+function boundsUnion(items: LayoutItem[]): Bounds {
+  if (!items.length) return { x: 0, y: 0, width: 1, height: 1 };
+  const left = Math.min(...items.map(item => item.bounds.x));
+  const top = Math.min(...items.map(item => item.bounds.y));
+  const right = Math.max(...items.map(item => item.bounds.x + item.bounds.width));
+  const bottom = Math.max(...items.map(item => item.bounds.y + item.bounds.height));
+  return { x: left, y: top, width: Math.max(right - left, 0.001), height: Math.max(bottom - top, 0.001) };
+}
+
+function mapBounds(bounds: Bounds, source: Bounds, target: Bounds): Bounds {
+  const scaleX = target.width / source.width;
+  const scaleY = target.height / source.height;
+  return {
+    x: target.x + (bounds.x - source.x) * scaleX,
+    y: target.y + (bounds.y - source.y) * scaleY,
+    width: bounds.width * scaleX,
+    height: bounds.height * scaleY,
+  };
+}
+
+function applyParam(param: Element, params: ParamMap) {
+  const name = param.getAttribute('name');
+  if (!name || !param.hasAttribute('value')) return;
+  params[name] = parseMAMENum(param.getAttribute('value')!, params);
+}
+
+type ExpandedVisitor = (child: Element, params: ParamMap) => void;
+
+function walkExpanded(parent: Element, initialParams: ParamMap, visit: ExpandedVisitor, terminalTags = new Set<string>()) {
+  const params = initialParams;
+  for (const child of Array.from(parent.children)) {
+    const tag = child.tagName.toLowerCase();
+    if (tag === 'param') {
+      applyParam(child, params);
+    } else if (tag === 'repeat') {
+      expandRepeat(child, params, visit, terminalTags);
+    } else {
+      visit(child, params);
+      if (!terminalTags.has(tag) && tag !== 'bounds' && tag !== 'color') {
+        walkExpanded(child, { ...params }, visit, terminalTags);
+      }
+    }
+  }
+}
+
+function expandRepeat(repeat: Element, outerParams: ParamMap, visit: ExpandedVisitor, terminalTags: Set<string>) {
+  const count = Math.max(0, parseMAMEInt(subParams(repeat.getAttribute('count') || '1', outerParams)));
+  const params = Array.from(repeat.children).filter(el => el.tagName.toLowerCase() === 'param');
+  const generators = new Map<string, { value: number | string; increment?: number; lshift?: number; rshift?: number }>();
+  for (const param of params) {
+    const name = param.getAttribute('name') || '';
+    if (param.hasAttribute('start')) {
+      generators.set(name, {
+        value: parseMAMENum(param.getAttribute('start')!, outerParams),
+        increment: param.hasAttribute('increment') ? parseMAMENumber(param.getAttribute('increment')!, outerParams) : undefined,
+        lshift: param.hasAttribute('lshift') ? parseMAMEInt(subParams(param.getAttribute('lshift')!, outerParams)) : undefined,
+        rshift: param.hasAttribute('rshift') ? parseMAMEInt(subParams(param.getAttribute('rshift')!, outerParams)) : undefined,
+      });
+    }
+  }
+  for (let i = 0; i < count; i++) {
+    const iterParams = { ...outerParams };
+    for (const param of params) applyParam(param, iterParams);
+    generators.forEach((state, name) => { iterParams[name] = state.value; });
+    for (const child of Array.from(repeat.children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === 'param') continue;
+      if (tag === 'repeat') expandRepeat(child, iterParams, visit, terminalTags);
+      else {
+        visit(child, iterParams);
+        if (!terminalTags.has(tag) && tag !== 'bounds' && tag !== 'color') walkExpanded(child, { ...iterParams }, visit, terminalTags);
+      }
+    }
+    generators.forEach(state => {
+      let value = typeof state.value === 'number' ? state.value : parseMAMENumber(String(state.value), iterParams);
+      if (state.increment !== undefined) value += state.increment;
+      else if (state.lshift !== undefined) value *= Math.pow(2, state.lshift);
+      else if (state.rshift !== undefined) value = Math.floor(value / Math.pow(2, state.rshift));
+      state.value = value;
+    });
+  }
+}
+
 function parseViewChildren(
   parent: Element,
   view: ViewDef,
   elemDefs: Record<string, ElementDef>,
-  params: Record<string, number | string>
+  groupDefs: Record<string, Element>,
+  params: ParamMap,
+  sourceEditable: boolean,
+  groupStack: Set<string>
 ) {
-  for (const child of Array.from(parent.children)) {
+  walkExpanded(parent, params, (child, iterParams) => {
     switch (child.tagName.toLowerCase()) {
 
       case 'screen': {
-        const idx = parseInt(subParams(child.getAttribute('index') || '0', params));
+        const tag = child.getAttribute('tag') || undefined;
+        const idx = parseMAMEInt(subParams(child.getAttribute('index') || '0', iterParams));
         view.items.push({
           id: genId(), type: 'screen',
-          name: `screen${idx}`,
-          bounds: parseBoundsEl(child.querySelector('bounds')),
+          name: tag || `screen${idx}`,
+          bounds: parseBoundsEl(directChild(child, 'bounds'), iterParams),
           color:  {red:1,green:1,blue:1,alpha:1},
-          screenIndex: idx,
+          screenIndex: Number.isFinite(idx) ? idx : 0,
+          screenTag: tag,
+          sourceNode: child,
+          sourceBoundsNode: directChild(child, 'bounds') || undefined,
+          sourceEditable,
         });
         break;
       }
 
       case 'element': {
-        const ref    = subParams(child.getAttribute('ref') || child.getAttribute('name') || '', params);
-        const iname  = subParams(child.getAttribute('name') || ref, params);
+        const ref = subParams(child.getAttribute('ref') || child.getAttribute('name') || '', iterParams);
+        const iname = subParams(child.getAttribute('name') || ref, iterParams);
         const def    = elemDefs[ref];
-        const base   = def?.components[0];
-        const bounds = parseBoundsEl(child.querySelector('bounds'));
-        view.items.push({
-          id: genId(),
-          type:       base?.type || 'rect',
-          name:       iname,
-          bounds,
-          color:      base?.color || {red:1,green:1,blue:1,alpha:1},
-          defstate:   base?.defstate,
-          textString: base?.textString,
-          textAlign:  base?.textAlign,
-          imageFile:  base?.imageFile,
-          inputtag:   child.getAttribute('inputtag')  || undefined,
-          inputmask:  child.hasAttribute('inputmask')
-                        ? parseMAMEInt(child.getAttribute('inputmask')!)
-                        : undefined,
+        const desiredState = child.hasAttribute('state')
+          ? parseMAMEInt(subParams(child.getAttribute('state')!, iterParams))
+          : def?.components[0]?.defstate ?? 0;
+        let active = def?.components.filter(c => c.componentState === undefined || c.componentState === desiredState) || [];
+        if (!active.length && def?.components.length) {
+          const fallbackState = def.components.some(c => c.componentState === 1) ? 1 : def.components[0].componentState;
+          active = def.components.filter(c => c.componentState === undefined || c.componentState === fallbackState);
+        }
+        const base = active[0];
+        const boundsNode = directChild(child, 'bounds');
+        const bounds = parseBoundsEl(boundsNode, iterParams);
+        const instanceColor = directChild(child, 'color');
+        const componentSpace = boundsUnion(active);
+        const components = active.length ? active : [{
+          id: genId(), type: 'rect' as ItemType, name: iname,
+          bounds: { x: 0, y: 0, width: 1, height: 1 }, color: {red:1,green:1,blue:1,alpha:1},
+        }];
+        components.forEach((component, index) => {
+          view.items.push({
+            id: genId(),
+            type: component.type,
+            name: components.length > 1 ? `${iname}:${index + 1}` : iname,
+            bounds: mapBounds(component.bounds, componentSpace, bounds),
+            color: instanceColor ? parseColorEl(instanceColor, iterParams) : component.color,
+            defstate: component.defstate,
+            textString: component.textString,
+            textAlign: component.textAlign,
+            imageFile: component.imageFile,
+            inputtag: child.hasAttribute('inputtag') ? subParams(child.getAttribute('inputtag')!, iterParams) : undefined,
+            inputmask: child.hasAttribute('inputmask')
+                          ? parseMAMEInt(subParams(child.getAttribute('inputmask')!, iterParams))
+                          : undefined,
+            sourceNode: child,
+            sourceBoundsNode: boundsNode || undefined,
+            sourceComponentNode: component.sourceComponentNode,
+            sourceEditable: sourceEditable && index === 0,
+          });
         });
         break;
       }
 
       case 'group': {
-        const ref    = subParams(child.getAttribute('ref') || '', params);
-        const bounds = parseBoundsEl(child.querySelector('bounds'));
+        const ref = subParams(child.getAttribute('ref') || '', iterParams);
+        const boundsNode = directChild(child, 'bounds');
+        const bounds = parseBoundsEl(boundsNode, iterParams);
         view.items.push({
           id: genId(), type: 'group',
           name: ref || 'group',
           bounds,
           color: {red:1,green:1,blue:1,alpha:1},
           groupRef: ref,
+          sourceNode: child,
+          sourceBoundsNode: boundsNode || undefined,
+          sourceEditable,
         });
-        break;
-      }
-
-      case 'repeat': {
-        const count = parseInt(child.getAttribute('count') || '1');
-        // collect param elements inside this repeat
-        const paramEls = Array.from(child.querySelectorAll(':scope > param'));
-        // build initial param state for this repeat scope
-        const repParams: Record<string, { val: number|string; increment: number; lshift: number; rshift: number; isGen: boolean }> = {};
-        paramEls.forEach(p => {
-          const pname = p.getAttribute('name') || '';
-          if (p.getAttribute('start') !== null) {
-            repParams[pname] = {
-              val:       parseMAMENum(p.getAttribute('start')!, params),
-              increment: parseFloat(p.getAttribute('increment') || '0'),
-              lshift:    parseInt(p.getAttribute('lshift') || '0'),
-              rshift:    parseInt(p.getAttribute('rshift') || '0'),
-              isGen: true,
-            };
-          }
-          // value params inside repeat inherit outer scope
-        });
-
-        for (let iter = 0; iter < count; iter++) {
-          // build merged params for this iteration
-          const iterParams: Record<string, number|string> = { ...params };
-          // apply value params from the repeat element (re-evaluate each iter for inner params)
-          paramEls.forEach(p => {
-            const pname = p.getAttribute('name') || '';
-            if (p.getAttribute('value') !== null) {
-              iterParams[pname] = subParams(p.getAttribute('value')!, iterParams);
-            }
-          });
-          // apply generator params current values
-          Object.entries(repParams).forEach(([pname, state]) => {
-            iterParams[pname] = typeof state.val === 'number'
-              ? String(Math.round(state.val * 1e9) / 1e9)   // avoid float noise
-              : state.val;
-          });
-
-          // recurse into non-param children
-          const inner = document.createElement('div');
-          Array.from(child.children).forEach(c => {
-            if (c.tagName.toLowerCase() !== 'param') inner.appendChild(c.cloneNode(true));
-          });
-          parseViewChildren(inner, view, elemDefs, iterParams);
-
-          // advance generator params
-          Object.values(repParams).forEach(state => {
-            if (!state.isGen) return;
-            let v = typeof state.val === 'string' ? parseFloat(state.val) : state.val as number;
-            v += state.increment;
-            if (state.lshift) v = (v as number) * Math.pow(2, state.lshift);
-            if (state.rshift) v = Math.floor((v as number) / Math.pow(2, state.rshift));
-            state.val = v;
+        const definition = groupDefs[ref];
+        if (definition && !groupStack.has(ref)) {
+          const nestedStack = new Set(groupStack); nestedStack.add(ref);
+          const expanded: ViewDef = { id: genId(), name: ref, items: [] };
+          const groupParams = { ...iterParams };
+          Array.from(child.children)
+            .filter(el => el.tagName.toLowerCase() === 'param')
+            .forEach(param => applyParam(param, groupParams));
+          parseViewChildren(definition, expanded, elemDefs, groupDefs, groupParams, false, nestedStack);
+          const declaredBounds = directChild(definition, 'bounds');
+          const sourceBounds = declaredBounds ? parseBoundsEl(declaredBounds, groupParams) : boundsUnion(expanded.items);
+          expanded.items.forEach(item => {
+            item.bounds = mapBounds(item.bounds, sourceBounds, bounds);
+            item.sourceEditable = false;
+            view.items.push(item);
           });
         }
         break;
       }
     }
-  }
+  }, new Set(['screen', 'element', 'group']));
 }
 
 // Substitute ~paramname~ tokens in a string
@@ -1369,70 +1564,87 @@ function parseMAMEInt(s: string): number {
 }
 
 // Parse a MAME number that might be a param-substituted string
-function parseMAMENum(s: string, params: Record<string, number|string>): number|string {
+function parseMAMENumber(s: string, params: ParamMap): number {
   const sub = subParams(s, params);
-  const n = parseFloat(sub);
-  return isNaN(n) ? sub : n;
+  const trimmed = sub.trim();
+  if (/^[+-]?0x[0-9a-f]+$/i.test(trimmed)) {
+    const sign = trimmed.startsWith('-') ? -1 : 1;
+    return sign * parseInt(trimmed.replace(/^[+-]?0x/i, ''), 16);
+  }
+  if (/^[+-]?\$[0-9a-f]+$/i.test(trimmed)) {
+    const sign = trimmed.startsWith('-') ? -1 : 1;
+    return sign * parseInt(trimmed.replace(/^[+-]?\$/, ''), 16);
+  }
+  return Number(trimmed);
 }
 
-function parseBoundsEl(el: Element | null): Bounds {
+function parseMAMENum(s: string, params: ParamMap): number|string {
+  const sub = subParams(s, params);
+  const n = parseMAMENumber(sub, {});
+  return Number.isFinite(n) ? n : sub;
+}
+
+function parseBoundsEl(el: Element | null, params: ParamMap = {}): Bounds {
   if (!el) return { x:0, y:0, width:1, height:1 };
-  const left   = el.getAttribute('left');
-  const right  = el.getAttribute('right');
-  const top    = el.getAttribute('top');
-  const bottom = el.getAttribute('bottom');
-  const x      = el.getAttribute('x');
-  const y      = el.getAttribute('y');
-  const xc     = el.getAttribute('xc');
-  const yc     = el.getAttribute('yc');
-  const w      = el.getAttribute('width');
-  const h      = el.getAttribute('height');
+  const attr = (name: string) => {
+    const value = el.getAttribute(name);
+    return value === null ? null : parseMAMENumber(value, params);
+  };
+  const left = attr('left'), right = attr('right'), top = attr('top'), bottom = attr('bottom');
+  const x = attr('x'), y = attr('y'), xc = attr('xc'), yc = attr('yc');
+  const w = attr('width'), h = attr('height');
 
   let bx: number, by: number, bw: number, bh: number;
 
   // horizontal
   if (left !== null && right !== null) {
-    bx = parseFloat(left); bw = parseFloat(right) - bx;
+    bx = left; bw = right - bx;
   } else if (x !== null && w !== null) {
-    bx = parseFloat(x); bw = parseFloat(w);
+    bx = x; bw = w;
   } else if (xc !== null && w !== null) {
-    bw = parseFloat(w); bx = parseFloat(xc) - bw / 2;
+    bw = w; bx = xc - bw / 2;
   } else if (left !== null && w !== null) {
-    bx = parseFloat(left); bw = parseFloat(w);
+    bx = left; bw = w;
   } else if (x !== null) {
-    bx = parseFloat(x); bw = w !== null ? parseFloat(w) : 1;
+    bx = x; bw = w !== null ? w : 1;
   } else if (left !== null) {
-    bx = parseFloat(left); bw = 1;
+    bx = left; bw = 1;
   } else {
-    bx = 0; bw = w !== null ? parseFloat(w) : 1;
+    bx = 0; bw = w !== null ? w : 1;
   }
 
   // vertical
   if (top !== null && bottom !== null) {
-    by = parseFloat(top); bh = parseFloat(bottom) - by;
+    by = top; bh = bottom - by;
   } else if (y !== null && h !== null) {
-    by = parseFloat(y); bh = parseFloat(h);
+    by = y; bh = h;
   } else if (yc !== null && h !== null) {
-    bh = parseFloat(h); by = parseFloat(yc) - bh / 2;
+    bh = h; by = yc - bh / 2;
   } else if (top !== null && h !== null) {
-    by = parseFloat(top); bh = parseFloat(h);
+    by = top; bh = h;
   } else if (y !== null) {
-    by = parseFloat(y); bh = h !== null ? parseFloat(h) : 1;
+    by = y; bh = h !== null ? h : 1;
   } else if (top !== null) {
-    by = parseFloat(top); bh = 1;
+    by = top; bh = 1;
   } else {
-    by = 0; bh = h !== null ? parseFloat(h) : 1;
+    by = 0; bh = h !== null ? h : 1;
   }
 
-  return { x: bx, y: by, width: Math.max(bw, 0.001), height: Math.max(bh, 0.001) };
-}
-function parseColorEl(el: Element | null): Color {
-  if (!el) return {red:1,green:1,blue:1,alpha:1};
   return {
-    red:   parseFloat(el.getAttribute('red')   || '1'),
-    green: parseFloat(el.getAttribute('green') || '1'),
-    blue:  parseFloat(el.getAttribute('blue')  || '1'),
-    alpha: parseFloat(el.getAttribute('alpha') || '1'),
+    x: Number.isFinite(bx) ? bx : 0,
+    y: Number.isFinite(by) ? by : 0,
+    width: Number.isFinite(bw) ? Math.max(bw, 0.001) : 1,
+    height: Number.isFinite(bh) ? Math.max(bh, 0.001) : 1,
+  };
+}
+function parseColorEl(el: Element | null, params: ParamMap = {}): Color {
+  if (!el) return {red:1,green:1,blue:1,alpha:1};
+  const channel = (name: string) => {
+    const value = parseMAMENumber(el.getAttribute(name) || '1', params);
+    return Number.isFinite(value) ? value : 1;
+  };
+  return {
+    red: channel('red'), green: channel('green'), blue: channel('blue'), alpha: channel('alpha'),
   };
 }
 
