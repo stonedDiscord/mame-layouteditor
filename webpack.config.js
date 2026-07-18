@@ -9,7 +9,7 @@ module.exports = (_env, argv) => {
     output: {
       path: path.resolve(__dirname, 'dist'),
       filename: production ? 'assets/[name].[contenthash:8].js' : 'assets/[name].js',
-      publicPath: './',
+      publicPath: '/',
       clean: true,
     },
     devtool: production ? 'source-map' : 'eval-cheap-module-source-map',
@@ -39,8 +39,13 @@ module.exports = (_env, argv) => {
       }),
     ],
     devServer: {
-      static: false,
+      static: {
+        directory: path.resolve(__dirname, 'dist'),
+        publicPath: '/',
+      },
+      historyApiFallback: true,
       hot: true,
+      host: '0.0.0.0',
       port: 8080,
       client: {
         overlay: true,
