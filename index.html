@@ -416,6 +416,35 @@
     </div>
   </div>
 
+  <div class="pane-section">
+    <div class="pane-header">
+      Background
+      <button id="removeBackground" class="btn-icon sm danger" onclick="removeBackground()" title="Remove background" aria-label="Remove background" disabled>✕</button>
+    </div>
+    <div style="padding:8px">
+      <input id="backgroundFile" type="file" accept="image/*" aria-label="Load background image" onchange="loadBackground(this)" style="width:100%;font-size:11px">
+      <div id="backgroundName" style="margin:6px 0;color:var(--text2);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No image</div>
+      <div id="backgroundSettings" hidden>
+        <div class="prop-row">
+          <label class="prop-label" for="background-x">X</label>
+          <input id="background-x" type="number" step="any" onchange="onBackgroundBounds('x',this.value)">
+          <label class="prop-label" for="background-y">Y</label>
+          <input id="background-y" type="number" step="any" onchange="onBackgroundBounds('y',this.value)">
+        </div>
+        <div class="prop-row">
+          <label class="prop-label" for="background-width">W</label>
+          <input id="background-width" type="number" step="any" min="0.001" onchange="onBackgroundBounds('width',this.value)">
+          <label class="prop-label" for="background-height">H</label>
+          <input id="background-height" type="number" step="any" min="0.001" onchange="onBackgroundBounds('height',this.value)">
+        </div>
+        <div class="prop-row">
+          <label for="backgroundOpacity" style="font-size:10px;color:var(--text2)">Opacity</label>
+          <input id="backgroundOpacity" type="range" min="0" max="1" step="0.05" value="1" oninput="onBackgroundOpacity(this.value)" style="flex:1;min-width:0">
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- views -->
   <div class="pane-section">
     <div class="pane-header">

@@ -31,7 +31,8 @@ interface LayoutItem {
   componentState?: number;
 }
 
-interface ViewDef    { id: string; name: string; items: LayoutItem[]; sourceNode?: Element; }
+interface BackgroundImage { image: HTMLImageElement; name: string; bounds: Bounds; opacity: number; }
+interface ViewDef    { id: string; name: string; items: LayoutItem[]; sourceNode?: Element; background?: BackgroundImage; }
 interface ElementDef { id: string; name: string; components: LayoutItem[]; }
 interface LayoutDoc  { views: ViewDef[]; elements: ElementDef[]; sourceXml?: Document; }
 
@@ -247,8 +248,75 @@ function refreshViewsList() {
 function updateViewLabel() {
   const v = currentView();
   $('viewLabel').innerHTML = v ? `View: <strong>${esc(v.name)}</strong>` : 'No view selected';
-  const hasItems = v && v.items.length > 0;
+  const hasItems = v && (v.items.length > 0 || v.background);
   $('emptyState').style.display = hasItems ? 'none' : 'flex';
+  refreshBackgroundControls();
+}
+
+const backgroundLoads = new WeakMap<ViewDef, object>();
+
+async function loadBackground(input: HTMLInputElement) {
+  const file = input.files?.[0];
+  const view = currentView();
+  input.value = '';
+  if (!file || !view) return;
+  const request = {};
+  backgroundLoads.set(view, request);
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    if (!doc.views.includes(view) || backgroundLoads.get(view) !== request) return;
+    view.background = {
+      image, name: file.name, opacity: 1,
+      bounds: { x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight },
+    };
+    if (currentView() === view) fitView();
+  } catch {
+    if (backgroundLoads.get(view) === request) alert('Unable to load this image. Choose a supported image file.');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function removeBackground() {
+  const view = currentView();
+  if (!view) return;
+  backgroundLoads.delete(view);
+  delete view.background;
+  render();
+}
+
+function refreshBackgroundControls() {
+  const view = currentView();
+  const background = view?.background;
+  ($('backgroundFile') as HTMLInputElement).disabled = !view;
+  ($('removeBackground') as HTMLButtonElement).disabled = !background;
+  $('backgroundName').textContent = background?.name || 'No image';
+  $('backgroundName').title = background?.name || '';
+  $('backgroundSettings').hidden = !background;
+  if (!background) return;
+  for (const key of ['x', 'y', 'width', 'height'] as const) {
+    ($(`background-${key}`) as HTMLInputElement).value = String(background.bounds[key]);
+  }
+  ($('backgroundOpacity') as HTMLInputElement).value = String(background.opacity);
+}
+
+function onBackgroundBounds(key: keyof Bounds, value: string) {
+  const background = currentView()?.background;
+  const number = Number(value);
+  if (background && value.trim() && Number.isFinite(number) &&
+      ((key !== 'width' && key !== 'height') || number > 0)) {
+    background.bounds[key] = number;
+  }
+  render();
+}
+
+function onBackgroundOpacity(value: string) {
+  const background = currentView()?.background;
+  if (background) background.opacity = clamp(Number(value), 0, 1);
+  render();
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -438,15 +506,17 @@ function fitView() {
   }
 
   const v = currentView();
-  if (!v || v.items.length === 0) {
+  if (!v || (v.items.length === 0 && !v.background)) {
     viewScale = 1; viewOffX = 40; viewOffY = 40;
   } else {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    v.items.forEach(i => {
-      minX = Math.min(minX, i.bounds.x);
-      minY = Math.min(minY, i.bounds.y);
-      maxX = Math.max(maxX, i.bounds.x + i.bounds.width);
-      maxY = Math.max(maxY, i.bounds.y + i.bounds.height);
+    const bounds = v.items.map(item => item.bounds);
+    if (v.background) bounds.push(v.background.bounds);
+    bounds.forEach(bound => {
+      minX = Math.min(minX, bound.x);
+      minY = Math.min(minY, bound.y);
+      maxX = Math.max(maxX, bound.x + bound.width);
+      maxY = Math.max(maxY, bound.y + bound.height);
     });
     const pad    = 60;
     const rangeX = maxX - minX || 1;
@@ -468,6 +538,15 @@ function fitView() {
 
 function render() {
   ctx.clearRect(0, 0, canvasW, canvasH);
+  const background = currentView()?.background;
+  if (background) {
+    const bounds = background.bounds;
+    ctx.save();
+    ctx.globalAlpha = background.opacity;
+    ctx.drawImage(background.image, toCanvasX(bounds.x), toCanvasY(bounds.y),
+      bounds.width * viewScale, bounds.height * viewScale);
+    ctx.restore();
+  }
   drawGrid();
   currentView()?.items.forEach(item => drawItem(item));
   updateViewLabel();
@@ -1679,6 +1758,10 @@ W.onBounds         = onBounds;
 W.onColor          = onColor;
 W.onColorPick      = onColorPick;
 W.refreshLayers    = refreshLayers;
+W.loadBackground   = loadBackground;
+W.removeBackground = removeBackground;
+W.onBackgroundBounds = onBackgroundBounds;
+W.onBackgroundOpacity = onBackgroundOpacity;
 
 // ─────────────────────────────────────────────────────────────────
 // START
